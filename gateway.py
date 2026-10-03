@@ -104,7 +104,14 @@ class H(BaseHTTPRequestHandler):
                     "error": "browser failed",
                     "detail": (r.stderr or b"")[-500:].decode(errors="replace"),
                 })
-            return self._send(200, {"url": url, "format": fmt, "result": data})
+            if not isinstance(data, dict) or data.get("error"):
+                return self._send(502, {"error": "browser failed", "detail": data})
+            return self._send(200, {
+                "url": url,
+                "format": fmt,
+                "http_status": data.get("http_status"),
+                "content": data.get("content", ""),
+            })
         if path.startswith("/mcp"):
             if not authorized(self):
                 return self._send(401, {"error": "unauthorized"})

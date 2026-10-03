@@ -17,6 +17,7 @@ Auth: `?token=`, `Authorization: Bearer`, or `X-Token` header.
 curl -s -X POST https://<svc>.onrender.com/fetch?token=$BROWSER_TOKEN \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","format":"markdown"}'
+# => {"url":..., "format":"markdown", "http_status":200, "content":"..."}
 ```
 
 ## MCP example (any MCP client)
