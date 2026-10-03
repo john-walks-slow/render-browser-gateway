@@ -61,6 +61,12 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        # WS upgrades take precedence: '/' is also the CDP browser endpoint.
+        # (Health checks never send Upgrade.)
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            if not authorized(self):
+                return self._send(401, {"error": "unauthorized"})
+            return self._bridge_ws(path)
         if path in ("/health", "/healthz", "/"):
             return self._send(200, {"ok": True})
         if path == "/info":
