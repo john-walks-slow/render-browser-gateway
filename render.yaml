@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: browser-gateway
+    runtime: image
+    plan: free
+    region: singapore
+    image:
+      url: ghcr.io/john-walks-slow/render-browser-gateway:latest
+    healthCheckPath: /health
+    envVars:
+      - key: BROWSER_TOKEN
+        sync: false
