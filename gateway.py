@@ -196,34 +196,54 @@ class H(BaseHTTPRequestHandler):
             conn.close()
 
     def _bridge_ws(self, target):
+        import base64
+        import hashlib
+        import os as _os
         import select
         import socket as _socket
+        GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        ckey = self.headers.get("Sec-WebSocket-Key", "")
+        if not ckey:
+            return self._send(400, {"error": "missing Sec-WebSocket-Key"})
+        # 1. Complete the handshake with OUR client first.
+        accept = base64.b64encode(
+            hashlib.sha1((ckey + GUID).encode()).digest()).decode()
+        try:
+            self.connection.sendall(
+                ("HTTP/1.1 101 Switching Protocols\r\n"
+                 "Upgrade: websocket\r\n"
+                 "Connection: Upgrade\r\n"
+                 "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode("latin-1"))
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        # 2. Open our own handshake to the CDP backend.
         try:
             backend = _socket.create_connection((CDP_HOST, CDP_PORT), timeout=15)
-        except Exception as e:
-            return self._send(502, {"error": "cdp ws connect failed: %s" % e})
-        try:
-            lines = ["%s %s %s" % (self.command, target, self.request_version)]
-            for k, v in self.headers.items():
-                if k.lower() in ("host", "connection"):
-                    continue
-                lines.append("%s: %s" % (k, v))
-            lines.append("Host: %s:%d" % (CDP_HOST, CDP_PORT))
-            lines.append("Connection: Upgrade")
-            lines.append("")
-            lines.append("")
-            backend.sendall("\r\n".join(lines).encode("latin-1"))
-            # Relay backend's 101 (or error) response verbatim.
+            bkey = base64.b64encode(_os.urandom(16)).decode()
+            backend.sendall(
+                ("GET %s HTTP/1.1\r\n"
+                 "Host: %s:%d\r\n"
+                 "Upgrade: websocket\r\n"
+                 "Connection: Upgrade\r\n"
+                 "Sec-WebSocket-Key: %s\r\n"
+                 "Sec-WebSocket-Version: 13\r\n\r\n"
+                 % (target, CDP_HOST, CDP_PORT, bkey)).encode("latin-1"))
             head = b""
             while b"\r\n\r\n" not in head:
                 chunk = backend.recv(4096)
                 if not chunk:
                     raise ConnectionError("backend closed during handshake")
                 head += chunk
-            self.connection.sendall(head)
             if b" 101 " not in head.split(b"\r\n", 1)[0]:
+                raise ConnectionError("backend refused: %s" % head[:60])
+        except Exception:
+            try:
                 backend.close()
-                return
+            except Exception:
+                pass
+            return  # client already has its 101; just drop
+        # 3. Opaque byte relay (WS frames pass through untouched).
+        try:
             backend.setblocking(False)
             self.connection.setblocking(False)
             while True:
