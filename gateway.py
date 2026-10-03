@@ -21,6 +21,8 @@ from urllib.parse import urlparse, parse_qs
 TOKEN = os.environ.get("BROWSER_TOKEN", "")
 MCP_HOST = "127.0.0.1"
 MCP_PORT = int(os.environ.get("MCP_PORT", "8899"))
+CDP_HOST = "127.0.0.1"
+CDP_PORT = int(os.environ.get("CDP_PORT", "9222"))
 FETCH_TIMEOUT = int(os.environ.get("FETCH_TIMEOUT", "120"))
 MAX_BYTES = int(os.environ.get("DUMP_MAX_BYTES", "400000"))
 FETCH_FORMATS = ("markdown", "text", "html", "semantic_tree_text")
@@ -71,7 +73,10 @@ class H(BaseHTTPRequestHandler):
             if not authorized(self):
                 return self._send(401, {"error": "unauthorized"})
             return self._proxy()
-        return self._send(404, {"error": "not found"})
+        # Anything else goes to the CDP server (incl. WS upgrades).
+        if not authorized(self):
+            return self._send(401, {"error": "unauthorized"})
+        return self._proxy_cdp()
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -116,7 +121,16 @@ class H(BaseHTTPRequestHandler):
             if not authorized(self):
                 return self._send(401, {"error": "unauthorized"})
             return self._proxy()
-        return self._send(404, {"error": "not found"})
+        # Anything else goes to the CDP server (incl. WS upgrades).
+        if not authorized(self):
+            return self._send(401, {"error": "unauthorized"})
+        return self._proxy_cdp()
+
+    def do_PUT(self):
+        # PUT /json/new etc. belong to CDP.
+        if not authorized(self):
+            return self._send(401, {"error": "unauthorized"})
+        return self._proxy_cdp()
 
     def do_DELETE(self):
         path = urlparse(self.path).path
@@ -124,7 +138,10 @@ class H(BaseHTTPRequestHandler):
             if not authorized(self):
                 return self._send(401, {"error": "unauthorized"})
             return self._proxy()
-        return self._send(404, {"error": "not found"})
+        # DELETE /json/close/<id> belongs to CDP.
+        if not authorized(self):
+            return self._send(401, {"error": "unauthorized"})
+        return self._proxy_cdp()
 
     def _proxy(self):
         length = self.headers.get("Content-Length")
@@ -148,6 +165,87 @@ class H(BaseHTTPRequestHandler):
             self._send(502, {"error": "mcp upstream failed: %s" % e})
         finally:
             conn.close()
+
+    def _proxy_cdp(self):
+        # Strip ?token= etc: the CDP backend must not see our auth query.
+        target = urlparse(self.path).path
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            return self._bridge_ws(target)
+        length = self.headers.get("Content-Length")
+        body = self.rfile.read(int(length)) if length else None
+        fwd = {k: v for k, v in self.headers.items()
+               if k.lower() not in ("host", "content-length", "connection")}
+        conn = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=60)
+        try:
+            conn.request(self.command, target, body=body, headers=fwd)
+            resp = conn.getresponse()
+            payload = resp.read()
+            self.send_response(resp.status, resp.reason)
+            for k, v in resp.getheaders():
+                if k.lower() not in ("connection", "transfer-encoding", "content-length"):
+                    self.send_header(k, v)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            self._send(502, {"error": "cdp upstream failed: %s" % e})
+        finally:
+            conn.close()
+
+    def _bridge_ws(self, target):
+        import select
+        import socket as _socket
+        try:
+            backend = _socket.create_connection((CDP_HOST, CDP_PORT), timeout=15)
+        except Exception as e:
+            return self._send(502, {"error": "cdp ws connect failed: %s" % e})
+        try:
+            lines = ["%s %s %s" % (self.command, target, self.request_version)]
+            for k, v in self.headers.items():
+                if k.lower() in ("host", "connection"):
+                    continue
+                lines.append("%s: %s" % (k, v))
+            lines.append("Host: %s:%d" % (CDP_HOST, CDP_PORT))
+            lines.append("Connection: Upgrade")
+            lines.append("")
+            lines.append("")
+            backend.sendall("\r\n".join(lines).encode("latin-1"))
+            # Relay backend's 101 (or error) response verbatim.
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = backend.recv(4096)
+                if not chunk:
+                    raise ConnectionError("backend closed during handshake")
+                head += chunk
+            self.connection.sendall(head)
+            if b" 101 " not in head.split(b"\r\n", 1)[0]:
+                backend.close()
+                return
+            backend.setblocking(False)
+            self.connection.setblocking(False)
+            while True:
+                r, _, _ = select.select([self.connection, backend], [], [], 300)
+                if not r:
+                    break
+                for src in r:
+                    dst = backend if src is self.connection else self.connection
+                    try:
+                        data = src.recv(65536)
+                    except BlockingIOError:
+                        continue
+                    if not data:
+                        raise ConnectionError("closed")
+                    dst.sendall(data)
+        except Exception:
+            pass
+        finally:
+            try:
+                backend.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

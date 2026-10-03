@@ -8,6 +8,7 @@ Free-tier browser capability for AI Agents, running Lightpanda on Render
 | `GET /health` | none | Render health check |
 | `POST /fetch` | token | `{url, format}` → page content (`markdown`/`text`/`html`/`semantic_tree_text`) |
 | `ALL /mcp` | token | Streamable-HTTP MCP → full browser tools (navigate/click/type/extract) |
+| `GET /json/*`, `PUT /json/new`, `WS /devtools/*` | token (`?token=`) | Raw CDP passthrough (Playwright `connectOverCDP`, Puppeteer) |
 
 Auth: `?token=`, `Authorization: Bearer`, or `X-Token` header.
 
@@ -31,6 +32,20 @@ curl -s -X POST https://<svc>.onrender.com/fetch?token=$BROWSER_TOKEN \
     }
   }
 }
+```
+
+## CDP example (Playwright / Puppeteer)
+
+```js
+// 1. discover the browser WS endpoint (needs token)
+const targets = await (
+  await fetch('https://<svc>.onrender.com/json/version?token=' + TOKEN)
+).json();
+// 2. connect (http -> wss, keep path, keep ?token= for the gateway)
+const wsUrl = targets.webSocketDebuggerUrl
+  .replace('ws://', 'wss://')
+  .replace('127.0.0.1:9222', '<svc>.onrender.com') + '?token=' + TOKEN;
+const browser = await chromium.connectOverCDP(wsUrl);
 ```
 
 ## Limits (free tier)
