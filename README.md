@@ -36,17 +36,19 @@ curl -s -X POST https://<svc>.onrender.com/fetch?token=$BROWSER_TOKEN \
 
 ## CDP example (Playwright / Puppeteer)
 
+Browser-level WebSocket lives at `/` (token in query):
+
 ```js
-// 1. discover the browser WS endpoint (needs token)
-const targets = await (
-  await fetch('https://<svc>.onrender.com/json/version?token=' + TOKEN)
-).json();
-// 2. connect (http -> wss, keep path, keep ?token= for the gateway)
-const wsUrl = targets.webSocketDebuggerUrl
-  .replace('ws://', 'wss://')
-  .replace('127.0.0.1:9222', '<svc>.onrender.com') + '?token=' + TOKEN;
-const browser = await chromium.connectOverCDP(wsUrl);
+import { chromium } from 'playwright-core';
+const browser = await chromium.connectOverCDP(
+  'wss://<svc>.onrender.com/?token=' + TOKEN);
+const page = await (await browser.newContext()).newPage();
+await page.goto('https://example.com');
 ```
+
+`GET /json/version` and `GET /json/list` (same token) work for discovery;
+`PUT /json/new` is not implemented by Lightpanda — create targets over WS
+(`Target.createTarget`) instead.
 
 ## Limits (free tier)
 
